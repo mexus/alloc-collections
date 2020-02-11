@@ -3,15 +3,15 @@
 use core::cmp;
 use core::mem;
 use core::ops::Drop;
-use core::slice;
 use std::ptr::{self, NonNull};
 
-use crate::alloc::{Alloc, Global};
-use crate::layout_ext::LayoutExt;
-use crate::unique::Unique;
-use std::alloc::Layout;
-
+use crate::{
+    alloc::{Alloc, Global},
+    layout_ext::LayoutExt,
+    unique::Unique,
+};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
+use std::alloc::Layout;
 
 /// A low-level utility for more ergonomically allocating, reallocating, and deallocating
 /// a buffer of memory on the heap without having to worry about all the corner cases
@@ -200,14 +200,14 @@ impl<T> RawVec<T, Global> {
         }
     }
 
-    /// Converts a `Box<[T]>` into a `RawVec<T>`.
-    pub fn from_box(mut slice: Box<[T]>) -> Self {
-        unsafe {
-            let result = RawVec::from_raw_parts(slice.as_mut_ptr(), slice.len());
-            mem::forget(slice);
-            result
-        }
-    }
+    // /// Converts a `Box<[T]>` into a `RawVec<T>`.
+    // pub fn from_box(mut slice: Box<[T]>) -> Self {
+    //     unsafe {
+    //         let result = RawVec::from_raw_parts(slice.as_mut_ptr(), slice.len());
+    //         mem::forget(slice);
+    //         result
+    //     }
+    // }
 }
 
 impl<T, A: Alloc> RawVec<T, A> {
@@ -630,25 +630,25 @@ impl<T, A: Alloc> RawVec<T, A> {
     }
 }
 
-impl<T> RawVec<T, Global> {
-    /// Converts the entire buffer into `Box<[T]>`.
-    ///
-    /// Note that this will correctly reconstitute any `cap` changes
-    /// that may have been performed. (See description of type for details.)
-    ///
-    /// # Undefined Behavior
-    ///
-    /// All elements of `RawVec<T, Global>` must be initialized. Notice that
-    /// the rules around uninitialized boxed values are not finalized yet,
-    /// but until they are, it is advisable to avoid them.
-    pub unsafe fn into_box(self) -> Box<[T]> {
-        // NOTE: not calling `capacity()` here; actually using the real `cap` field!
-        let slice = slice::from_raw_parts_mut(self.as_ptr(), self.cap);
-        let output: Box<[T]> = Box::from_raw(slice);
-        mem::forget(self);
-        output
-    }
-}
+// impl<T> RawVec<T, Global> {
+//     /// Converts the entire buffer into `Box<[T]>`.
+//     ///
+//     /// Note that this will correctly reconstitute any `cap` changes
+//     /// that may have been performed. (See description of type for details.)
+//     ///
+//     /// # Undefined Behavior
+//     ///
+//     /// All elements of `RawVec<T, Global>` must be initialized. Notice that
+//     /// the rules around uninitialized boxed values are not finalized yet,
+//     /// but until they are, it is advisable to avoid them.
+//     pub unsafe fn into_box(self) -> Box<[T]> {
+//         // NOTE: not calling `capacity()` here; actually using the real `cap` field!
+//         let slice = slice::from_raw_parts_mut(self.as_ptr(), self.cap);
+//         let output: Box<[T]> = Box::from_raw(slice);
+//         mem::forget(self);
+//         output
+//     }
+// }
 
 impl<T, A: Alloc> RawVec<T, A> {
     /// Frees the memory owned by the `RawVec` *without* trying to drop its contents.

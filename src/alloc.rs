@@ -679,7 +679,7 @@ unsafe impl<A: StdGlobalAlloc> Alloc for GlobalAlloc<A> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Global;
 
 unsafe impl Alloc for Global {

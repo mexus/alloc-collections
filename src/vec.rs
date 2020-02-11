@@ -1435,15 +1435,22 @@ impl Drop for SetLenOnDrop<'_> {
 // Common trait implementations for Vec
 ////////////////////////////////////////////////////////////////////////////////
 
-// impl<T: Clone> Clone for Vec<T> {
-//     fn clone(&self) -> Vec<T> {
-//         <[T]>::to_vec(&**self)
-//     }
-//
-//     fn clone_from(&mut self, other: &Vec<T>) {
-//         other.as_slice().clone_into(self);
-//     }
-// }
+impl<T: Clone, A: Alloc + Clone> Clone for Vec<T, A> {
+    fn clone(&self) -> Vec<T, A> {
+        let allocator = self.buf.alloc().clone();
+        if mem::size_of::<T>() == 0 {
+            let mut new_vec = Vec::<T, _>::new_in(allocator);
+            unsafe { new_vec.set_len(self.len()) };
+            new_vec
+        } else {
+            let mut new_vec = Vec::with_capacity_in(self.len(), allocator).expect("Clone failed");
+            new_vec
+                .extend_from_slice(&self[..])
+                .expect("Is not supposed to allocate");
+            new_vec
+        }
+    }
+}
 
 impl<T: Hash, A: Alloc> Hash for Vec<T, A> {
     #[inline]
@@ -1905,7 +1912,7 @@ impl<T> Drop for IntoIter<T> {
 ///
 /// [`drain`]: struct.Vec.html#method.drain
 /// [`Vec`]: struct.Vec.html
-pub struct Drain<'a, T: 'a, A: Alloc> {
+pub struct Drain<'a, T: 'a, A: Alloc = Global> {
     /// Index of tail to preserve
     tail_start: usize,
     /// Length of tail
