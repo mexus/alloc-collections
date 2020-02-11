@@ -653,6 +653,90 @@ pub unsafe trait Alloc {
     }
 }
 
+unsafe impl<A: Alloc> Alloc for &mut A {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, Error> {
+        A::alloc(self, layout)
+    }
+
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        A::dealloc(self, ptr, layout)
+    }
+
+    #[inline]
+    fn usable_size(&self, layout: &Layout) -> (usize, usize) {
+        A::usable_size(self, layout)
+    }
+
+    unsafe fn realloc(
+        &mut self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_size: usize,
+    ) -> Result<NonNull<u8>, Error> {
+        A::realloc(self, ptr, layout, new_size)
+    }
+
+    unsafe fn alloc_zeroed(&mut self, layout: Layout) -> Result<NonNull<u8>, Error> {
+        A::alloc_zeroed(self, layout)
+    }
+
+    unsafe fn alloc_excess(&mut self, layout: Layout) -> Result<Excess, Error> {
+        A::alloc_excess(self, layout)
+    }
+
+    unsafe fn realloc_excess(
+        &mut self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_size: usize,
+    ) -> Result<Excess, Error> {
+        A::realloc_excess(self, ptr, layout, new_size)
+    }
+
+    unsafe fn grow_in_place(
+        &mut self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_size: usize,
+    ) -> Result<(), CannotReallocInPlace> {
+        A::grow_in_place(self, ptr, layout, new_size)
+    }
+
+    unsafe fn shrink_in_place(
+        &mut self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_size: usize,
+    ) -> Result<(), CannotReallocInPlace> {
+        A::shrink_in_place(self, ptr, layout, new_size)
+    }
+
+    fn alloc_one<T>(&mut self) -> Result<NonNull<T>, Error> {
+        A::alloc_one(self)
+    }
+
+    unsafe fn dealloc_one<T>(&mut self, ptr: NonNull<T>) {
+        A::dealloc_one(self, ptr)
+    }
+
+    fn alloc_array<T>(&mut self, n: usize) -> Result<NonNull<T>, Error> {
+        A::alloc_array(self, n)
+    }
+
+    unsafe fn realloc_array<T>(
+        &mut self,
+        ptr: NonNull<T>,
+        n_old: usize,
+        n_new: usize,
+    ) -> Result<NonNull<T>, Error> {
+        A::realloc_array(self, ptr, n_old, n_new)
+    }
+
+    unsafe fn dealloc_array<T>(&mut self, ptr: NonNull<T>, n: usize) -> Result<(), AllocErr> {
+        A::dealloc_array(self, ptr, n)
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GlobalAlloc<A>(A);
 
@@ -703,4 +787,65 @@ unsafe impl Alloc for Global {
     }
 }
 
+unsafe impl Alloc for &Global {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, Error> {
+        Global.alloc(layout)
+    }
+
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        Global.dealloc(ptr, layout)
+    }
+
+    unsafe fn realloc(
+        &mut self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_size: usize,
+    ) -> Result<NonNull<u8>, Error> {
+        Global.realloc(ptr, layout, new_size)
+    }
+}
+
 pub type System = GlobalAlloc<::std::alloc::System>;
+
+unsafe impl Alloc for &System {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, Error> {
+        GlobalAlloc(::std::alloc::System).alloc(layout)
+    }
+
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        GlobalAlloc(::std::alloc::System).dealloc(ptr, layout)
+    }
+
+    unsafe fn realloc(
+        &mut self,
+        ptr: NonNull<u8>,
+        layout: Layout,
+        new_size: usize,
+    ) -> Result<NonNull<u8>, Error> {
+        GlobalAlloc(::std::alloc::System).realloc(ptr, layout, new_size)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NoOp;
+
+unsafe impl Alloc for NoOp {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, Error> {
+        Err(Error::AllocationError { layout })
+    }
+
+    unsafe fn dealloc(&mut self, _ptr: NonNull<u8>, _layout: Layout) {
+        /* No op */
+    }
+}
+
+unsafe impl Alloc for &NoOp {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, Error> {
+        NoOp.alloc(layout)
+    }
+
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        NoOp.dealloc(ptr, layout)
+    }
+}

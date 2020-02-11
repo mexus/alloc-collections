@@ -6,6 +6,7 @@ pub mod layout_ext;
 pub mod raw_vec;
 pub mod unique;
 pub mod vec;
+pub mod fixed_vec;
 
 pub use alloc::Alloc;
 pub use indexmap::IndexMap;

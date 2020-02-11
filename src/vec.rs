@@ -427,9 +427,14 @@ impl<T, A: Alloc> Vec<T, A> {
     ///     assert_eq!(rebuilt, [4, 5, 6]);
     /// }
     /// ```
-    pub unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Vec<T> {
+    pub unsafe fn from_raw_parts(
+        ptr: *mut T,
+        length: usize,
+        capacity: usize,
+        allocator: A,
+    ) -> Vec<T, A> {
         Vec {
-            buf: RawVec::from_raw_parts(ptr, capacity),
+            buf: RawVec::from_raw_parts(ptr, capacity, allocator),
             len: length,
         }
     }
@@ -1260,9 +1265,23 @@ impl<T, A: Alloc> Vec<T, A> {
         }
         Ok(())
     }
+
+    pub fn allocator(&self) -> &A {
+        self.buf.alloc()
+    }
+
+    pub fn allocator_mut(&mut self) -> &mut A {
+        self.buf.alloc_mut()
+    }
 }
 
 impl<T: Clone, A: Alloc> Vec<T, A> {
+    pub fn repeat_in(value: T, count: usize, allocator: A) -> Result<Self, raw_vec::Error> {
+        let mut v = Self::with_capacity_in(count, allocator)?;
+        v.resize(count, value)?;
+        Ok(v)
+    }
+
     /// Resizes the `Vec` in-place so that `len` is equal to `new_len`.
     ///
     /// If `new_len` is greater than `len`, the `Vec` is extended by the
@@ -1507,7 +1526,7 @@ where
 
 impl<T, A: Alloc> IntoIterator for Vec<T, A> {
     type Item = T;
-    type IntoIter = IntoIter<T>;
+    type IntoIter = IntoIter<T, A>;
 
     /// Creates a consuming iterator, that is, one that moves each value out of
     /// the vector (from start to end). The vector cannot be used after calling
@@ -1523,7 +1542,7 @@ impl<T, A: Alloc> IntoIterator for Vec<T, A> {
     /// }
     /// ```
     #[inline]
-    fn into_iter(mut self) -> IntoIter<T> {
+    fn into_iter(mut self) -> IntoIter<T, A> {
         unsafe {
             let begin = self.as_mut_ptr();
             let end = if mem::size_of::<T>() == 0 {
@@ -1535,6 +1554,7 @@ impl<T, A: Alloc> IntoIterator for Vec<T, A> {
                 begin.add(self.len()) as *const T
             };
             let cap = self.buf.capacity();
+            let alloc = self.buf.take_allocator_out();
             mem::forget(self);
             IntoIter {
                 buf: NonNull::new_unchecked(begin),
@@ -1542,6 +1562,7 @@ impl<T, A: Alloc> IntoIterator for Vec<T, A> {
                 cap,
                 ptr: begin,
                 end,
+                alloc: mem::MaybeUninit::new(alloc),
             }
         }
     }
@@ -1657,9 +1678,9 @@ macro_rules! __impl_slice_eq1 {
     }
 }
 
-__impl_slice_eq1! { [] Vec<A>, Vec<B>, }
-__impl_slice_eq1! { [] Vec<A>, &[B], }
-__impl_slice_eq1! { [] Vec<A>, &mut [B], }
+__impl_slice_eq1! { [AllocA, AllocB] Vec<A, AllocA>, Vec<B, AllocB>, AllocA: Alloc, AllocB: Alloc}
+__impl_slice_eq1! { [AllocA] Vec<A, AllocA>, &[B], AllocA: Alloc}
+__impl_slice_eq1! { [AllocA] Vec<A, AllocA>, &mut [B], AllocA: Alloc }
 // __impl_slice_eq1! { [] Cow<'_, [A]>, &[B], A: Clone }
 // __impl_slice_eq1! { [] Cow<'_, [A]>, &mut [B], A: Clone }
 // __impl_slice_eq1! { [] Cow<'_, [A]>, Vec<B>, A: Clone }
@@ -1674,19 +1695,19 @@ __impl_slice_eq1! { [] Vec<A>, &mut [B], }
 //__impl_slice_eq1! { [const N: usize] Cow<'a, [A]>, &mut [B; N], [B; N]: LengthAtMost32 }
 
 /// Implements comparison of vectors, lexicographically.
-impl<T: PartialOrd> PartialOrd for Vec<T> {
+impl<T: PartialOrd, A: Alloc> PartialOrd for Vec<T, A> {
     #[inline]
-    fn partial_cmp(&self, other: &Vec<T>) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         PartialOrd::partial_cmp(&**self, &**other)
     }
 }
 
-impl<T: Eq> Eq for Vec<T> {}
+impl<T: Eq, A: Alloc> Eq for Vec<T, A> {}
 
 /// Implements ordering of vectors, lexicographically.
-impl<T: Ord> Ord for Vec<T> {
+impl<T: Ord, A: Alloc> Ord for Vec<T, A> {
     #[inline]
-    fn cmp(&self, other: &Vec<T>) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         Ord::cmp(&**self, &**other)
     }
 }
@@ -1708,41 +1729,43 @@ impl<T> Default for Vec<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Vec<T> {
+impl<T: fmt::Debug, A: Alloc> fmt::Debug for Vec<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T> AsRef<Vec<T>> for Vec<T> {
-    fn as_ref(&self) -> &Vec<T> {
+impl<T, A: Alloc> AsRef<Vec<T, A>> for Vec<T, A> {
+    fn as_ref(&self) -> &Vec<T, A> {
         self
     }
 }
 
-impl<T> AsMut<Vec<T>> for Vec<T> {
-    fn as_mut(&mut self) -> &mut Vec<T> {
+impl<T, A: Alloc> AsMut<Vec<T, A>> for Vec<T, A> {
+    fn as_mut(&mut self) -> &mut Vec<T, A> {
         self
     }
 }
 
-impl<T> AsRef<[T]> for Vec<T> {
+impl<T, A: Alloc> AsRef<[T]> for Vec<T, A> {
     fn as_ref(&self) -> &[T] {
         self
     }
 }
 
-impl<T> AsMut<[T]> for Vec<T> {
+impl<T, A: Alloc> AsMut<[T]> for Vec<T, A> {
     fn as_mut(&mut self) -> &mut [T] {
         self
     }
 }
 
-// impl<T: Clone> From<&[T]> for Vec<T> {
-//     fn from(s: &[T]) -> Vec<T> {
-//         s.to_vec()
-//     }
-// }
+impl<T: Clone, A: Default + Alloc> From<&[T]> for Vec<T, A> {
+    fn from(s: &[T]) -> Vec<T, A> {
+        let mut v = Vec::with_capacity_in(s.len(), A::default()).expect("Unable to init a vector");
+        v.extend_from_slice(s).expect("Does not expect to allocate");
+        v
+    }
+}
 
 // impl<T: Clone> From<&mut [T]> for Vec<T> {
 //     fn from(s: &mut [T]) -> Vec<T> {
@@ -1773,21 +1796,22 @@ impl<T> AsMut<[T]> for Vec<T> {
 ///
 /// [`Vec`]: struct.Vec.html
 /// [`IntoIterator`]: ../../std/iter/trait.IntoIterator.html
-pub struct IntoIter<T> {
+pub struct IntoIter<T, A: Alloc> {
     buf: NonNull<T>,
     phantom: PhantomData<T>,
     cap: usize,
     ptr: *const T,
     end: *const T,
+    alloc: mem::MaybeUninit<A>,
 }
 
-impl<T: fmt::Debug> fmt::Debug for IntoIter<T> {
+impl<T: fmt::Debug, A: Alloc> fmt::Debug for IntoIter<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("IntoIter").field(&self.as_slice()).finish()
     }
 }
 
-impl<T> IntoIter<T> {
+impl<T, A: Alloc> IntoIter<T, A> {
     /// Returns the remaining items of this iterator as a slice.
     ///
     /// # Examples
@@ -1821,10 +1845,10 @@ impl<T> IntoIter<T> {
     }
 }
 
-unsafe impl<T: Send> Send for IntoIter<T> {}
-unsafe impl<T: Sync> Sync for IntoIter<T> {}
+unsafe impl<T: Send, A: Alloc + Send> Send for IntoIter<T, A> {}
+unsafe impl<T: Sync, A: Alloc + Sync> Sync for IntoIter<T, A> {}
 
-impl<T> Iterator for IntoIter<T> {
+impl<T, A: Alloc> Iterator for IntoIter<T, A> {
     type Item = T;
 
     #[inline]
@@ -1863,7 +1887,7 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> DoubleEndedIterator for IntoIter<T> {
+impl<T, A: Alloc> DoubleEndedIterator for IntoIter<T, A> {
     #[inline]
     fn next_back(&mut self) -> Option<T> {
         unsafe {
@@ -1886,9 +1910,9 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     }
 }
 
-impl<T> ExactSizeIterator for IntoIter<T> {}
+impl<T, A: Alloc> ExactSizeIterator for IntoIter<T, A> {}
 
-impl<T> FusedIterator for IntoIter<T> {}
+impl<T, A: Alloc> FusedIterator for IntoIter<T, A> {}
 
 // impl<T: Clone> Clone for IntoIter<T> {
 //     fn clone(&self) -> IntoIter<T> {
@@ -1896,13 +1920,14 @@ impl<T> FusedIterator for IntoIter<T> {}
 //     }
 // }
 
-impl<T> Drop for IntoIter<T> {
+impl<T, A: Alloc> Drop for IntoIter<T, A> {
     fn drop(&mut self) {
         // destroy the remaining elements
         for _x in self.by_ref() {}
 
         // RawVec handles deallocation
-        let _ = unsafe { RawVec::from_raw_parts(self.buf.as_ptr(), self.cap) };
+        let alloc = mem::replace(&mut self.alloc, mem::MaybeUninit::uninit());
+        let _ = unsafe { RawVec::from_raw_parts(self.buf.as_ptr(), self.cap, alloc.assume_init()) };
     }
 }
 

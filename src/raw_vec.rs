@@ -40,7 +40,6 @@ use std::alloc::Layout;
 /// `shrink_to_fit`, and `from_box` will actually set `RawVec`'s private capacity
 /// field. This allows zero-sized types to not be special-cased by consumers of
 /// this type.
-#[allow(missing_debug_implementations)]
 pub struct RawVec<T, A: Alloc = Global> {
     ptr: Unique<T>,
     cap: usize,
@@ -184,7 +183,7 @@ impl<T, A: Alloc> RawVec<T, A> {
     }
 }
 
-impl<T> RawVec<T, Global> {
+impl<T, A: Alloc> RawVec<T, A> {
     /// Reconstitutes a `RawVec` from a pointer and capacity.
     ///
     /// # Undefined Behavior
@@ -192,11 +191,11 @@ impl<T> RawVec<T, Global> {
     /// The `ptr` must be allocated (on the system heap), and with the given `capacity`.
     /// The `capacity` cannot exceed `isize::MAX` (only a concern on 32-bit systems).
     /// If the `ptr` and `capacity` come from a `RawVec`, then this is guaranteed.
-    pub unsafe fn from_raw_parts(ptr: *mut T, capacity: usize) -> Self {
+    pub unsafe fn from_raw_parts(ptr: *mut T, capacity: usize, allocator: A) -> Self {
         RawVec {
             ptr: Unique::new_unchecked(ptr),
             cap: capacity,
-            a: Global,
+            a: allocator,
         }
     }
 
@@ -560,6 +559,14 @@ impl<T, A: Alloc> RawVec<T, A> {
             self.cap = amount;
         }
         Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// It is UB to use any methods of the `RawVec` after calling this method. The only safe thing
+    /// to do is to `forget` the `RawVec`.
+    pub unsafe fn take_allocator_out(&mut self) -> A {
+        (&mut self.a as *mut A).read()
     }
 }
 

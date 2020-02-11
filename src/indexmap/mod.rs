@@ -2,11 +2,10 @@
 pub mod macros;
 
 mod equivalent;
+pub mod map;
 mod mutable_keys;
 mod util;
-pub mod map;
 
-use crate::{vec::Vec, alloc::Alloc};
 pub use equivalent::Equivalent;
 pub use map::IndexMap;
 
@@ -69,9 +68,7 @@ impl<K, V> Bucket<K, V> {
 
 trait Entries {
     type Entry;
-    type Alloc: Alloc;
 
-    fn into_entries(self) -> Vec<Self::Entry, Self::Alloc>;
     fn as_entries(&self) -> &[Self::Entry];
     fn as_entries_mut(&mut self) -> &mut [Self::Entry];
     fn with_entries<F>(&mut self, f: F)

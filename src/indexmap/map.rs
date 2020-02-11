@@ -1,7 +1,7 @@
 //! `IndexMap` is a hash table where the iteration order of the key-value
 //! pairs is independent of the hash values of the keys.
 
-use crate::vec::Vec;
+use crate::{fixed_vec::FixedVec, vec::Vec};
 
 pub use super::mutable_keys::MutableKeys;
 
@@ -16,7 +16,7 @@ use std::collections::hash_map::RandomState;
 use std::cmp::{max, Ordering};
 use std::fmt;
 use std::marker::PhantomData;
-use std::mem::replace;
+use std::mem::{self, replace};
 
 use crate::{
     alloc::{Alloc, Global},
@@ -297,13 +297,49 @@ pub struct IndexMap<K, V, S = RandomState, A: Alloc = Global> {
 }
 
 // core of the map that does not depend on S
-#[derive(Clone)]
 struct OrderMapCore<K, V, A: Alloc> {
     pub(crate) mask: usize,
     /// indices are the buckets. indices.len() == raw capacity
-    pub(crate) indices: Box<[Pos]>,
+    pub(crate) indices: FixedVec<Pos>,
     /// entries is a dense vec of entries in their order. entries.len() == len
     pub(crate) entries: Vec<Bucket<K, V>, A>,
+}
+
+impl<K, V, A: Alloc> Clone for OrderMapCore<K, V, A>
+where
+    K: Clone,
+    V: Clone,
+    A: Clone,
+{
+    fn clone(&self) -> Self {
+        let mut allocator = self.entries.allocator().clone();
+        let indices = self
+            .indices
+            .clone_with(&mut allocator)
+            .expect("Can't clone indices");
+        let entries = self.entries.clone();
+        OrderMapCore {
+            mask: self.mask,
+            indices,
+            entries,
+        }
+    }
+}
+
+impl<K, V, A: Alloc> Drop for OrderMapCore<K, V, A> {
+    fn drop(&mut self) {
+        // let allocator = self.entries.allocator_mut();
+        // unsafe { self.indices.destroy(allocator) };
+    }
+}
+
+impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
+    fn take_entries(mut self) -> Vec<Bucket<K, V>, A> {
+        unsafe { self.indices.destroy(self.entries.allocator_mut()) };
+        let entries = &mut self.entries as *mut Vec<Bucket<K, V>, A>;
+        mem::forget(self);
+        unsafe { entries.read() }
+    }
 }
 
 #[inline(always)]
@@ -313,11 +349,6 @@ fn desired_pos(mask: usize, hash: HashValue) -> usize {
 
 impl<K, V, S, A: Alloc> Entries for IndexMap<K, V, S, A> {
     type Entry = Bucket<K, V>;
-    type Alloc = A;
-
-    fn into_entries(self) -> Vec<Self::Entry, A> {
-        self.core.entries
-    }
 
     fn as_entries(&self) -> &[Self::Entry] {
         &self.core.entries
@@ -468,7 +499,11 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
     /// allocate if `n` is zero.)
     ///
     /// Computes in **O(n)** time.
-    pub fn with_capacity_and_hasher_in(n: usize, hash_builder: S, alloc: A) -> Result<Self, Error>
+    pub fn with_capacity_and_hasher_in(
+        n: usize,
+        hash_builder: S,
+        mut alloc: A,
+    ) -> Result<Self, Error>
     where
         S: BuildHasher,
     {
@@ -476,7 +511,7 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
             Ok(IndexMap {
                 core: OrderMapCore {
                     mask: 0,
-                    indices: Box::new([]),
+                    indices: FixedVec::repeat_in(Pos::none(), 0, &mut alloc)?,
                     entries: Vec::new_in(alloc),
                 },
                 hash_builder,
@@ -484,10 +519,12 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
         } else {
             let raw = to_raw_capacity(n);
             let raw_cap = max(raw.next_power_of_two(), 8);
+            // let indices = vec![Pos::none(); raw_cap].into_boxed_slice();
+            let indices = FixedVec::repeat_in(Pos::none(), raw_cap, &mut alloc)?;
             Ok(IndexMap {
                 core: OrderMapCore {
                     mask: raw_cap.wrapping_sub(1),
-                    indices: vec![Pos::none(); raw_cap].into_boxed_slice(),
+                    indices,
                     entries: Vec::with_capacity_in(usable_capacity(raw_cap), alloc)?,
                 },
                 hash_builder,
@@ -1258,7 +1295,7 @@ where
     /// the key-value pairs with the result.
     ///
     /// The sort is stable.
-    pub fn sorted_by<F>(mut self, mut cmp: F) -> IntoIter<K, V>
+    pub fn sorted_by<F>(mut self, mut cmp: F) -> IntoIter<K, V, A>
     where
         F: FnMut(&K, &V, &K, &V) -> Ordering,
     {
@@ -1381,8 +1418,11 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         debug_assert_eq!(self.len(), 0);
         let raw_cap = 8usize;
         self.mask = raw_cap.wrapping_sub(1);
-        self.indices = vec![Pos::none(); raw_cap].into_boxed_slice();
 
+        let allocator = self.entries.allocator_mut();
+
+        self.indices = FixedVec::repeat_in(Pos::none(), raw_cap, allocator)?;
+        // self.indices = vec![Pos::none(); raw_cap].into_boxed_slice();
         self.entries.try_reserve(usable_capacity(raw_cap))
     }
 
@@ -1413,7 +1453,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let new_raw_cap = self.indices.len() * 2;
         let old_indices = replace(
             &mut self.indices,
-            vec![Pos::none(); new_raw_cap].into_boxed_slice(),
+            // vec![Pos::none(); new_raw_cap].into_boxed_slice(),
+            FixedVec::repeat_in(Pos::none(), new_raw_cap, self.entries.allocator_mut())?,
         );
         self.mask = new_raw_cap.wrapping_sub(1);
 
@@ -2039,29 +2080,29 @@ impl<'a, K, V> ExactSizeIterator for IterMut<'a, K, V> {
 ///
 /// [`into_iter`]: struct.IndexMap.html#method.into_iter
 /// [`IndexMap`]: struct.IndexMap.html
-pub struct IntoIter<K, V> {
-    pub(crate) iter: VecIntoIter<Bucket<K, V>>,
+pub struct IntoIter<K, V, A: Alloc> {
+    pub(crate) iter: VecIntoIter<Bucket<K, V>, A>,
 }
 
-impl<K, V> Iterator for IntoIter<K, V> {
+impl<K, V, A: Alloc> Iterator for IntoIter<K, V, A> {
     type Item = (K, V);
 
     iterator_methods!(Bucket::key_value);
 }
 
-impl<'a, K, V> DoubleEndedIterator for IntoIter<K, V> {
+impl<'a, K, V, A: Alloc> DoubleEndedIterator for IntoIter<K, V, A> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.iter.next_back().map(Bucket::key_value)
     }
 }
 
-impl<K, V> ExactSizeIterator for IntoIter<K, V> {
+impl<K, V, A: Alloc> ExactSizeIterator for IntoIter<K, V, A> {
     fn len(&self) -> usize {
         self.iter.len()
     }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for IntoIter<K, V> {
+impl<K: fmt::Debug, V: fmt::Debug, A: Alloc> fmt::Debug for IntoIter<K, V, A> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let iter = self.iter.as_slice().iter().map(Bucket::refs);
         f.debug_list().entries(iter).finish()
@@ -2124,10 +2165,10 @@ where
     S: BuildHasher,
 {
     type Item = (K, V);
-    type IntoIter = IntoIter<K, V>;
+    type IntoIter = IntoIter<K, V, A>;
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
-            iter: self.core.entries.into_iter(),
+            iter: self.core.take_entries().into_iter(),
         }
     }
 }
