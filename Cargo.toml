@@ -4,6 +4,7 @@ version = "0.2.0"
 authors = ["mexus <gilaldpellaeon@gmail.com>"]
 edition = "2018"
 description = "Collections with custom allocator support"
+license = "MIT/Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
