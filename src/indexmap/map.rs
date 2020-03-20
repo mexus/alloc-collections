@@ -1,7 +1,7 @@
 //! `IndexMap` is a hash table where the iteration order of the key-value
 //! pairs is independent of the hash values of the keys.
 
-use crate::{fixed_vec::FixedVec, vec::Vec};
+use crate::{boxes::CustomBox, vec::Vec};
 
 pub use super::mutable_keys::MutableKeys;
 
@@ -16,7 +16,9 @@ use std::collections::hash_map::RandomState;
 use std::cmp::{max, Ordering};
 use std::fmt;
 use std::marker::PhantomData;
-use std::mem::{self, replace};
+use std::mem::replace;
+
+use std::ops::{Index, IndexMut};
 
 use crate::{
     alloc::{Alloc, Global},
@@ -290,55 +292,70 @@ where
 /// assert_eq!(letters[&'u'], 1);
 /// assert_eq!(letters.get(&'y'), None);
 /// ```
-#[derive(Clone)]
 pub struct IndexMap<K, V, S = RandomState, A: Alloc = Global> {
     core: OrderMapCore<K, V, A>,
     hash_builder: S,
+}
+
+impl<K, V, S, A> Clone for IndexMap<K, V, S, A>
+where
+    K: Clone,
+    V: Clone,
+    S: Clone,
+    A: Alloc + Clone,
+{
+    fn clone(&self) -> Self {
+        self.try_clone().expect("Cloning an index map failed")
+    }
+}
+
+impl<K, V, S, A> IndexMap<K, V, S, A>
+where
+    K: Clone,
+    V: Clone,
+    S: Clone,
+    A: Alloc + Clone,
+{
+    /// Tries to clone the index map.
+    pub fn try_clone(&self) -> Result<Self, Error> {
+        let core = self.core.try_clone()?;
+        let hash_builder = self.hash_builder.clone();
+        Ok(IndexMap { core, hash_builder })
+    }
 }
 
 // core of the map that does not depend on S
 struct OrderMapCore<K, V, A: Alloc> {
     pub(crate) mask: usize,
     /// indices are the buckets. indices.len() == raw capacity
-    pub(crate) indices: FixedVec<Pos>,
+    pub(crate) indices: CustomBox<[Pos], A>,
     /// entries is a dense vec of entries in their order. entries.len() == len
     pub(crate) entries: Vec<Bucket<K, V>, A>,
 }
 
-impl<K, V, A: Alloc> Clone for OrderMapCore<K, V, A>
+impl<K, V, A: Alloc> OrderMapCore<K, V, A>
 where
     K: Clone,
     V: Clone,
     A: Clone,
 {
-    fn clone(&self) -> Self {
-        let mut allocator = self.entries.allocator().clone();
+    fn try_clone(&self) -> Result<Self, Error> {
         let indices = self
             .indices
-            .clone_with(&mut allocator)
-            .expect("Can't clone indices");
-        let entries = self.entries.clone();
-        OrderMapCore {
+            .try_clone_slice()
+            .map_err(|source| Error::Allocation { source })?;
+        let entries = self.entries.try_clone()?;
+        Ok(OrderMapCore {
             mask: self.mask,
             indices,
             entries,
-        }
-    }
-}
-
-impl<K, V, A: Alloc> Drop for OrderMapCore<K, V, A> {
-    fn drop(&mut self) {
-        // let allocator = self.entries.allocator_mut();
-        // unsafe { self.indices.destroy(allocator) };
+        })
     }
 }
 
 impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
-    fn take_entries(mut self) -> Vec<Bucket<K, V>, A> {
-        unsafe { self.indices.destroy(self.entries.allocator_mut()) };
-        let entries = &mut self.entries as *mut Vec<Bucket<K, V>, A>;
-        mem::forget(self);
-        unsafe { entries.read() }
+    fn take_entries(self) -> Vec<Bucket<K, V>, A> {
+        self.entries
     }
 }
 
@@ -385,6 +402,7 @@ where
     K: fmt::Debug + Hash + Eq,
     V: fmt::Debug,
     S: BuildHasher,
+    A: Clone,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()?;
@@ -392,7 +410,7 @@ where
             return Ok(());
         }
         writeln!(f)?;
-        for (i, index) in enumerate(&*self.core.indices) {
+        for (i, index) in enumerate(self.core.indices.as_slice()) {
             write!(f, "{}: {:?}", i, index)?;
             if let Some(pos) = index.pos() {
                 let hash = self.core.entries[pos].hash;
@@ -458,7 +476,7 @@ impl<K, V> IndexMap<K, V> {
     }
 }
 
-impl<K, V, A: Alloc> IndexMap<K, V, RandomState, A> {
+impl<K, V, A: Alloc + Clone> IndexMap<K, V, RandomState, A> {
     /// Create a new map. (Does not allocate.)
     pub fn new_in(alloc: A) -> Self {
         Self::with_capacity_in(0, alloc).expect("No allocation expected")
@@ -499,19 +517,17 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
     /// allocate if `n` is zero.)
     ///
     /// Computes in **O(n)** time.
-    pub fn with_capacity_and_hasher_in(
-        n: usize,
-        hash_builder: S,
-        mut alloc: A,
-    ) -> Result<Self, Error>
+    pub fn with_capacity_and_hasher_in(n: usize, hash_builder: S, alloc: A) -> Result<Self, Error>
     where
         S: BuildHasher,
+        A: Clone,
     {
         if n == 0 {
             Ok(IndexMap {
                 core: OrderMapCore {
                     mask: 0,
-                    indices: FixedVec::repeat_in(Pos::none(), 0, &mut alloc)?,
+                    indices: CustomBox::<[_], _>::new_unsized_in(&[], alloc.clone())
+                        .expect("Empty array, won't panic"),
                     entries: Vec::new_in(alloc),
                 },
                 hash_builder,
@@ -519,8 +535,8 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
         } else {
             let raw = to_raw_capacity(n);
             let raw_cap = max(raw.next_power_of_two(), 8);
-            // let indices = vec![Pos::none(); raw_cap].into_boxed_slice();
-            let indices = FixedVec::repeat_in(Pos::none(), raw_cap, &mut alloc)?;
+            let indices =
+                Vec::repeat_in(Pos::none(), raw_cap, alloc.clone())?.try_into_boxed_slice()?;
             Ok(IndexMap {
                 core: OrderMapCore {
                     mask: raw_cap.wrapping_sub(1),
@@ -536,6 +552,7 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
     pub fn with_hasher_in(hash_builder: S, alloc: A) -> Result<Self, Error>
     where
         S: BuildHasher,
+        A: Clone,
     {
         Self::with_capacity_and_hasher_in(0, hash_builder, alloc)
     }
@@ -596,7 +613,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
     #[inline(always)]
     fn raw_capacity(&self) -> usize {
-        self.indices.len()
+        self.indices.as_slice().len()
     }
 }
 
@@ -729,7 +746,9 @@ impl<'a, K, V, A: Alloc> Entry<'a, K, V, A> {
     }
 }
 
-impl<'a, K: 'a + fmt::Debug, V: 'a + fmt::Debug, A: Alloc> fmt::Debug for Entry<'a, K, V, A> {
+impl<'a, K: 'a + fmt::Debug, V: 'a + fmt::Debug, A: Alloc + Clone> fmt::Debug
+    for Entry<'a, K, V, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Entry::Vacant(ref v) => f.debug_tuple(stringify!(Entry)).field(v).finish(),
@@ -832,7 +851,7 @@ impl<'a, K, V, A: Alloc> OccupiedEntry<'a, K, V, A> {
     }
 }
 
-impl<'a, K: 'a + fmt::Debug, V: 'a + fmt::Debug, A: Alloc> fmt::Debug
+impl<'a, K: 'a + fmt::Debug, V: 'a + fmt::Debug, A: Alloc + Clone> fmt::Debug
     for OccupiedEntry<'a, K, V, A>
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -921,7 +940,10 @@ where
     /// Reserve capacity for `additional` more key-value pairs.
     ///
     /// FIXME Not implemented fully yet.
-    pub fn reserve(&mut self, additional: usize) -> Result<(), Error> {
+    pub fn reserve(&mut self, additional: usize) -> Result<(), Error>
+    where
+        A: Clone,
+    {
         if additional > 0 {
             self.reserve_one()?;
         }
@@ -941,7 +963,10 @@ where
         self.core.insert_phase_1::<Sz>(hash, key, value)
     }
 
-    fn reserve_one(&mut self) -> Result<(), Error> {
+    fn reserve_one(&mut self) -> Result<(), Error>
+    where
+        A: Clone,
+    {
         if self.len() == self.capacity() {
             dispatch_32_vs_64!(self.double_capacity())?;
         }
@@ -950,6 +975,7 @@ where
     fn double_capacity<Sz>(&mut self) -> Result<(), Error>
     where
         Sz: Size,
+        A: Clone,
     {
         self.core.double_capacity::<Sz>()
     }
@@ -967,7 +993,10 @@ where
     ///
     /// See also [`entry`](#method.entry) if you you want to insert *or* modify
     /// or if you need to get the index of the corresponding key-value pair.
-    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, Error> {
+    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>, Error>
+    where
+        A: Clone,
+    {
         self.reserve_one()?;
         Ok(if self.size_class_is_64bit() {
             match self.insert_phase_1::<u64>(key, value)? {
@@ -1003,7 +1032,10 @@ where
     ///
     /// See also [`entry`](#method.entry) if you you want to insert *or* modify
     /// or if you need to get the index of the corresponding key-value pair.
-    pub fn insert_full(&mut self, key: K, value: V) -> Result<(usize, Option<V>), Error> {
+    pub fn insert_full(&mut self, key: K, value: V) -> Result<(usize, Option<V>), Error>
+    where
+        A: Clone,
+    {
         let entry = self.entry(key)?;
         let index = entry.index();
 
@@ -1020,7 +1052,10 @@ where
     /// in-place manipulation.
     ///
     /// Computes in **O(1)** time (amortized average).
-    pub fn entry(&mut self, key: K) -> Result<Entry<K, V, A>, Error> {
+    pub fn entry(&mut self, key: K) -> Result<Entry<K, V, A>, Error>
+    where
+        A: Clone,
+    {
         self.reserve_one()?;
         Ok(dispatch_32_vs_64!(self.entry_phase_1(key)))
     }
@@ -1323,7 +1358,7 @@ where
     Ord::cmp(k1, k2)
 }
 
-impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
+impl<K, V, S, A: Alloc + Clone> IndexMap<K, V, S, A> {
     /// Get a key-value pair by index
     ///
     /// Valid indices are *0 <= index < self.len()*
@@ -1409,19 +1444,23 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
     // clear self.indices to the same state as "no elements"
     fn clear_indices(&mut self) {
-        for pos in self.indices.iter_mut() {
+        for pos in self.indices.as_slice_mut() {
             *pos = Pos::none();
         }
     }
 
-    fn first_allocation(&mut self) -> Result<(), Error> {
+    fn first_allocation(&mut self) -> Result<(), Error>
+    where
+        A: Clone,
+    {
         debug_assert_eq!(self.len(), 0);
         let raw_cap = 8usize;
         self.mask = raw_cap.wrapping_sub(1);
 
         let allocator = self.entries.allocator_mut();
 
-        self.indices = FixedVec::repeat_in(Pos::none(), raw_cap, allocator)?;
+        self.indices =
+            Vec::repeat_in(Pos::none(), raw_cap, allocator.clone())?.try_into_boxed_slice()?;
         // self.indices = vec![Pos::none(); raw_cap].into_boxed_slice();
         self.entries.try_reserve(usable_capacity(raw_cap))
     }
@@ -1431,6 +1470,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
     fn double_capacity<Sz>(&mut self) -> Result<(), Error>
     where
         Sz: Size,
+        A: Clone,
     {
         debug_assert!(self.raw_capacity() == 0 || self.len() > 0);
         if self.raw_capacity() == 0 {
@@ -1439,7 +1479,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
         // find first ideally placed element -- start of cluster
         let mut first_ideal = 0;
-        for (i, index) in enumerate(&*self.indices) {
+        for (i, index) in enumerate(self.indices.as_slice()) {
             if let Some(pos) = index.pos() {
                 if 0 == probe_distance(self.mask, self.entries[pos].hash, i) {
                     first_ideal = i;
@@ -1450,13 +1490,15 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
         // visit the entries in an order where we can simply reinsert them
         // into self.indices without any bucket stealing.
-        let new_raw_cap = self.indices.len() * 2;
+        let new_raw_cap = self.indices.as_slice().len() * 2;
         let old_indices = replace(
             &mut self.indices,
-            // vec![Pos::none(); new_raw_cap].into_boxed_slice(),
-            FixedVec::repeat_in(Pos::none(), new_raw_cap, self.entries.allocator_mut())?,
+            Vec::repeat_in(Pos::none(), new_raw_cap, self.entries.allocator().clone())?
+                .try_into_boxed_slice()?,
         );
         self.mask = new_raw_cap.wrapping_sub(1);
+
+        let old_indices = old_indices.as_slice();
 
         // `Sz` is the old size class, and either u32 or u64 is the new
         for &pos in &old_indices[first_ideal..] {
@@ -1490,10 +1532,12 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
             };
             // find first empty bucket and insert there
             let mut probe = desired_pos(self.mask, entry_hash);
-            probe_loop!(probe < self.indices.len(), {
-                if self.indices[probe].is_none() {
+
+            let indices = self.indices.as_slice_mut();
+            probe_loop!(probe < indices.len(), {
+                if indices[probe].is_none() {
                     // empty bucket, insert here
-                    self.indices[probe] = Pos::with_hash::<SzNew>(i, entry_hash);
+                    indices[probe] = Pos::with_hash::<SzNew>(i, entry_hash);
                     return;
                 }
             });
@@ -1518,8 +1562,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let mut probe = desired_pos(self.mask, hash);
         let mut dist = 0;
         debug_assert!(self.len() < self.raw_capacity());
-        probe_loop!(probe < self.indices.len(), {
-            if let Some((i, hash_proxy)) = self.indices[probe].resolve::<Sz>() {
+        probe_loop!(probe < self.indices.as_slice().len(), {
+            if let Some((i, hash_proxy)) = self.indices.as_slice()[probe].resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 // if existing element probed less than us, swap
                 let their_dist = probe_distance(self.mask, entry_hash.into_hash(), probe);
@@ -1571,8 +1615,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let mut dist = 0;
         let insert_kind;
         debug_assert!(self.len() < self.raw_capacity());
-        probe_loop!(probe < self.indices.len(), {
-            let pos = &mut self.indices[probe];
+        probe_loop!(probe < self.indices.as_slice().len(), {
+            let pos = &mut self.indices.as_slice_mut()[probe];
             if let Some((i, hash_proxy)) = pos.resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 // if existing element probed less than us, swap
@@ -1608,8 +1652,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
     where
         Sz: Size,
     {
-        probe_loop!(probe < self.indices.len(), {
-            let pos = &mut self.indices[probe];
+        probe_loop!(probe < self.indices.as_slice().len(), {
+            let pos = &mut self.indices.as_slice_mut()[probe];
             if pos.is_none() {
                 *pos = old_pos;
                 break;
@@ -1635,8 +1679,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         debug_assert!(self.len() > 0);
         let mut probe = desired_pos(self.mask, hash);
         let mut dist = 0;
-        probe_loop!(probe < self.indices.len(), {
-            if let Some((i, hash_proxy)) = self.indices[probe].resolve::<Sz>() {
+        probe_loop!(probe < self.indices.as_slice().len(), {
+            if let Some((i, hash_proxy)) = self.indices.as_slice()[probe].resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 if dist > probe_distance(self.mask, entry_hash.into_hash(), probe) {
                     // give up when probe distance is too long
@@ -1659,7 +1703,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let hash = entry.hash;
         let actual_pos = ptrdistance(&self.entries[0], entry);
         let probe = dispatch_32_vs_64!(self =>
-            find_existing_entry_at(&self.indices, hash, self.mask, actual_pos));
+            find_existing_entry_at(self.indices.as_slice(), hash, self.mask, actual_pos));
         (probe, actual_pos)
     }
 
@@ -1675,14 +1719,14 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         // index `probe` and entry `found` is to be removed
         // use Vec::remove, but then we need to update the indices that point
         // to all of the other entries that have to move
-        self.indices[probe] = Pos::none();
+        self.indices.as_slice_mut()[probe] = Pos::none();
         let entry = self.entries.remove(found);
 
         // correct indices that point to the entries that followed the removed entry.
         // use a heuristic between a full sweep vs. a `probe_loop!` for every shifted item.
-        if self.indices.len() < (self.entries.len() - found) * 2 {
+        if self.indices.as_slice().len() < (self.entries.len() - found) * 2 {
             // shift all indices greater than `found`
-            for pos in self.indices.iter_mut() {
+            for pos in self.indices.as_slice_mut() {
                 if let Some((i, _)) = pos.resolve::<Sz>() {
                     if i > found {
                         // shift the index
@@ -1695,8 +1739,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
             for (offset, entry) in enumerate(&self.entries[found..]) {
                 let index = found + offset;
                 let mut probe = desired_pos(self.mask, entry.hash);
-                probe_loop!(probe < self.indices.len(), {
-                    let pos = &mut self.indices[probe];
+                probe_loop!(probe < self.indices.as_slice().len(), {
+                    let pos = &mut self.indices.as_slice_mut()[probe];
                     if let Some((i, _)) = pos.resolve::<Sz>() {
                         if i == index + 1 {
                             // found it, shift it
@@ -1725,7 +1769,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         // index `probe` and entry `found` is to be removed
         // use swap_remove, but then we need to update the index that points
         // to the other entry that has to move
-        self.indices[probe] = Pos::none();
+        self.indices.as_slice_mut()[probe] = Pos::none();
         let entry = self.entries.swap_remove(found);
 
         // correct index that points to the entry that had to swap places
@@ -1733,8 +1777,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
             // was not last element
             // examine new element in `found` and find it in indices
             let mut probe = desired_pos(self.mask, entry.hash);
-            probe_loop!(probe < self.indices.len(), {
-                let pos = &mut self.indices[probe];
+            probe_loop!(probe < self.indices.as_slice().len(), {
+                let pos = &mut self.indices.as_slice_mut()[probe];
                 if let Some((i, _)) = pos.resolve::<Sz>() {
                     if i >= self.entries.len() {
                         // found it
@@ -1758,12 +1802,13 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         // after probe, shift all non-ideally placed indices backward
         let mut last_probe = probe_at_remove;
         let mut probe = probe_at_remove + 1;
-        probe_loop!(probe < self.indices.len(), {
-            if let Some((i, hash_proxy)) = self.indices[probe].resolve::<Sz>() {
+        let indices = self.indices.as_slice_mut();
+        probe_loop!(probe < indices.len(), {
+            if let Some((i, hash_proxy)) = indices[probe].resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 if probe_distance(self.mask, entry_hash.into_hash(), probe) > 0 {
-                    self.indices[last_probe] = self.indices[probe];
-                    self.indices[probe] = Pos::none();
+                    indices[last_probe] = indices[probe];
+                    indices[probe] = Pos::none();
                 } else {
                     break;
                 }
@@ -1792,13 +1837,14 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
                 hash = ent.hash;
                 will_keep = keep(&mut ent.key, &mut ent.value);
             };
-            let probe = find_existing_entry_at::<Sz>(&self.indices, hash, self.mask, i);
+            let indices = self.indices.as_slice_mut();
+            let probe = find_existing_entry_at::<Sz>(&indices, hash, self.mask, i);
             if !will_keep {
                 n_deleted += 1;
-                self.indices[probe] = Pos::none();
+                indices[probe] = Pos::none();
                 self.backward_shift_after_removal::<Sz>(probe);
             } else if n_deleted > 0 {
-                self.indices[probe].set_pos::<Sz>(i - n_deleted);
+                indices[probe].set_pos::<Sz>(i - n_deleted);
                 self.entries.swap(i - n_deleted, i);
             }
         }
@@ -1833,7 +1879,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         }
 
         // Apply new index to self.indices
-        dispatch_32_vs_64!(self => apply_new_index(&mut self.indices, &side_index));
+        dispatch_32_vs_64!(self => apply_new_index(self.indices.as_slice_mut(), &side_index));
 
         fn apply_new_index<Sz>(indices: &mut [Pos], new_index: &[usize])
         where
@@ -2173,8 +2219,6 @@ where
     }
 }
 
-use std::ops::{Index, IndexMut};
-
 impl<'a, K, V, Q: ?Sized, S, A: Alloc> Index<&'a Q> for IndexMap<K, V, S, A>
 where
     Q: Hash + Equivalent<K>,
@@ -2237,6 +2281,7 @@ impl<K, V, S, A: Alloc> Extend<(K, V)> for IndexMap<K, V, S, A>
 where
     K: Hash + Eq,
     S: BuildHasher,
+    A: Clone,
 {
     /// Extend the map with all key-value pairs in the iterable.
     ///
@@ -2259,6 +2304,7 @@ where
     K: Hash + Eq + Copy,
     V: Copy,
     S: BuildHasher,
+    A: Clone,
 {
     /// Extend the map with all key-value pairs in the iterable.
     ///
@@ -2271,7 +2317,7 @@ where
 impl<K, V, S, A> Default for IndexMap<K, V, S, A>
 where
     S: BuildHasher + Default,
-    A: Alloc + Default,
+    A: Alloc + Default + Clone,
 {
     /// Return an empty `IndexMap`
     fn default() -> Self {

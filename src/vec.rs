@@ -61,7 +61,7 @@ use core::fmt;
 use core::hash::{self, Hash};
 use core::iter::{FromIterator, FusedIterator};
 use core::marker::PhantomData;
-use core::mem;
+use core::mem::{self, align_of, ManuallyDrop};
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ops::{self, Index, IndexMut, RangeBounds};
 use core::ptr::{self, NonNull};
@@ -69,8 +69,13 @@ use core::slice::{self, SliceIndex};
 
 use crate::{
     alloc::{Alloc, Global},
+    boxes::CustomBox,
     raw_vec::{self, RawVec},
 };
+use core::{alloc::Layout, convert::TryFrom};
+
+#[macro_use]
+mod macros;
 
 /// A contiguous growable array type, written `Vec<T>` but pronounced 'vector'.
 ///
@@ -369,6 +374,57 @@ impl<T, A: Alloc> Vec<T, A> {
         })
     }
 
+    /// Converts the vector into `CustomBox<[T]>`.
+    ///
+    /// Note that this will drop any excess capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use alloc_collections::{vec, Vec};
+    ///
+    /// let v = vec![1, 2, 3].unwrap();
+    ///
+    /// let slice = v.try_into_boxed_slice().unwrap();
+    /// ```
+    ///
+    /// Any excess capacity is removed:
+    ///
+    /// ```
+    /// use alloc_collections::Vec;
+    ///
+    /// let mut vec = Vec::with_capacity(10).unwrap();
+    /// vec.extend([1, 2, 3].iter().cloned());
+    ///
+    /// assert_eq!(vec.capacity(), 10);
+    /// let slice = vec.try_into_boxed_slice().unwrap();
+    /// assert_eq!(slice.into_vec().capacity(), 3);
+    /// ```
+    pub fn try_into_boxed_slice(mut self) -> Result<CustomBox<[T], A>, raw_vec::Error> {
+        self.shrink_to_fit()?;
+        let mut vector = ManuallyDrop::new(self);
+        let allocator = unsafe { vector.buf.take_allocator_out() };
+
+        let layout = unsafe {
+            Layout::from_size_align_unchecked(vector.buf.allocated_size(), align_of::<T>())
+        };
+
+        let boxed =
+            unsafe { CustomBox::from_raw_parts(vector.buf.ptr().cast(), layout, allocator) };
+        Ok(boxed)
+    }
+
+    /// Converts an owned box slice into a vector.
+    pub fn from_boxed_slice(slice: CustomBox<[T], A>) -> Self {
+        let (ptr, layout, allocator) = slice.into_raw_parts();
+        let length = layout.size() / core::mem::size_of::<T>();
+        let raw = unsafe { RawVec::from_raw_parts_in(ptr.as_ptr().cast::<T>(), length, allocator) };
+        Vec {
+            buf: raw,
+            len: length,
+        }
+    }
+
     /// Creates a `Vec<T>` directly from the raw components of another vector.
     ///
     /// # Safety
@@ -467,10 +523,9 @@ impl<T, A: Alloc> Vec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(try_reserve)]
-    /// use std::collections::TryReserveError;
+    /// use alloc_collections::{Vec, raw_vec::Error};
     ///
-    /// fn process_data(data: &[u32]) -> Result<Vec<u32>, TryReserveError> {
+    /// fn process_data(data: &[u32]) -> Result<Vec<u32>, Error> {
     ///     let mut output = Vec::new();
     ///
     ///     // Pre-reserve the memory, exiting if we can't
@@ -506,10 +561,9 @@ impl<T, A: Alloc> Vec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(try_reserve)]
-    /// use std::collections::TryReserveError;
+    /// use alloc_collections::{raw_vec::Error, Vec};
     ///
-    /// fn process_data(data: &[u32]) -> Result<Vec<u32>, TryReserveError> {
+    /// fn process_data(data: &[u32]) -> Result<Vec<u32>, Error> {
     ///     let mut output = Vec::new();
     ///
     ///     // Pre-reserve the memory, exiting if we can't
@@ -548,39 +602,6 @@ impl<T, A: Alloc> Vec<T, A> {
         }
         Ok(())
     }
-
-    // /// Converts the vector into [`Box<[T]>`][owned slice].
-    // ///
-    // /// Note that this will drop any excess capacity.
-    // ///
-    // /// [owned slice]: ../../std/boxed/struct.Box.html
-    // ///
-    // /// # Examples
-    // ///
-    // /// ```
-    // /// let v = vec![1, 2, 3];
-    // ///
-    // /// let slice = v.into_boxed_slice();
-    // /// ```
-    // ///
-    // /// Any excess capacity is removed:
-    // ///
-    // /// ```
-    // /// let mut vec = Vec::with_capacity(10);
-    // /// vec.extend([1, 2, 3].iter().cloned());
-    // ///
-    // /// assert_eq!(vec.capacity(), 10);
-    // /// let slice = vec.into_boxed_slice();
-    // /// assert_eq!(slice.into_vec().capacity(), 3);
-    // /// ```
-    // pub fn into_boxed_slice(mut self) -> Box<[T]> {
-    //     unsafe {
-    //         self.shrink_to_fit();
-    //         let buf = ptr::read(&self.buf);
-    //         mem::forget(self);
-    //         buf.into_box()
-    //     }
-    // }
 
     /// Shortens the vector, keeping the first `len` elements and dropping
     /// the rest.
@@ -1456,17 +1477,24 @@ impl Drop for SetLenOnDrop<'_> {
 
 impl<T: Clone, A: Alloc + Clone> Clone for Vec<T, A> {
     fn clone(&self) -> Vec<T, A> {
+        self.try_clone().expect("Cloning a vector failed")
+    }
+}
+
+impl<T: Clone, A: Alloc + Clone> Vec<T, A> {
+    /// Tries to clone the vector.
+    pub fn try_clone(&self) -> Result<Vec<T, A>, raw_vec::Error> {
         let allocator = self.buf.alloc().clone();
         if mem::size_of::<T>() == 0 {
             let mut new_vec = Vec::<T, _>::new_in(allocator);
             unsafe { new_vec.set_len(self.len()) };
-            new_vec
+            Ok(new_vec)
         } else {
-            let mut new_vec = Vec::with_capacity_in(self.len(), allocator).expect("Clone failed");
+            let mut new_vec = Vec::with_capacity_in(self.len(), allocator)?;
             new_vec
                 .extend_from_slice(&self[..])
                 .expect("Is not supposed to allocate");
-            new_vec
+            Ok(new_vec)
         }
     }
 }
@@ -1959,8 +1987,9 @@ impl<'a, T, A: Alloc> Drain<'a, T, A> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(vec_drain_as_slice)]
-    /// let mut vec = vec!['a', 'b', 'c'];
+    /// use alloc_collections::vec;
+    ///
+    /// let mut vec = vec!['a', 'b', 'c'].unwrap();
     /// let mut drain = vec.drain(..);
     /// assert_eq!(drain.as_slice(), &['a', 'b', 'c']);
     /// let _ = drain.next().unwrap();
@@ -2139,5 +2168,12 @@ impl<T, A: Alloc> Drain<'_, T, A> {
         ptr::copy(src, dst, self.tail_len);
         self.tail_start = new_tail_start;
         Ok(())
+    }
+}
+
+impl<T, A: Alloc> TryFrom<Vec<T, A>> for CustomBox<[T], A> {
+    type Error = raw_vec::Error;
+    fn try_from(vec: Vec<T, A>) -> Result<Self, Self::Error> {
+        vec.try_into_boxed_slice()
     }
 }

@@ -1,7 +1,7 @@
 //! This is mostly a copy of `std::alloc::Alloc`.
 
 use crate::layout_ext::LayoutExt;
-use snafu::{ensure, OptionExt, Snafu};
+use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{
     alloc::Layout,
     cmp, fmt,
@@ -37,21 +37,13 @@ pub enum Error {
         new_items: usize,
     },
 
+    #[snafu(display("Deallocation failed: {}", source))]
+    DeallocError {
+        source: crate::layout_ext::LayoutErrExt,
+    },
+
     #[snafu(display("Can't allocate space for a single zero-sized element"))]
     ZeroSize,
-}
-
-/// The `AllocErr` error indicates an allocation failure
-/// that may be due to resource exhaustion or to
-/// something wrong when combining the given input arguments with this
-/// allocator.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct AllocErr;
-
-impl fmt::Display for AllocErr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("memory allocation failed")
-    }
 }
 
 /// The `CannotReallocInPlace` error is used when [`grow_in_place`] or
@@ -642,14 +634,12 @@ pub unsafe trait Alloc {
     /// constraints.
     ///
     /// Always returns `Err` on arithmetic overflow.
-    unsafe fn dealloc_array<T>(&mut self, ptr: NonNull<T>, n: usize) -> Result<(), AllocErr>
+    unsafe fn dealloc_array<T>(&mut self, ptr: NonNull<T>, n: usize) -> Result<(), Error>
     where
         Self: Sized,
     {
-        match Layout::array_ext::<T>(n) {
-            Ok(k) if k.size() > 0 => Ok(self.dealloc(ptr.cast(), k)),
-            _ => Err(AllocErr),
-        }
+        let layout = Layout::array_ext::<T>(n).context(DeallocError)?;
+        Ok(self.dealloc(ptr.cast(), layout))
     }
 }
 
@@ -732,7 +722,7 @@ unsafe impl<A: Alloc> Alloc for &mut A {
         A::realloc_array(self, ptr, n_old, n_new)
     }
 
-    unsafe fn dealloc_array<T>(&mut self, ptr: NonNull<T>, n: usize) -> Result<(), AllocErr> {
+    unsafe fn dealloc_array<T>(&mut self, ptr: NonNull<T>, n: usize) -> Result<(), Error> {
         A::dealloc_array(self, ptr, n)
     }
 }

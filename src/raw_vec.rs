@@ -233,6 +233,11 @@ impl<T, A: Alloc> RawVec<T, A> {
         }
     }
 
+    /// The amount of allocated memory.
+    pub fn allocated_size(&self) -> usize {
+        self.cap * mem::size_of::<T>()
+    }
+
     /// Returns a shared reference to the allocator backing this `RawVec`.
     pub fn alloc(&self) -> &A {
         &self.a
@@ -280,10 +285,8 @@ impl<T, A: Alloc> RawVec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(raw_vec_internals)]
-    /// # extern crate alloc;
     /// # use std::ptr;
-    /// # use alloc::raw_vec::RawVec;
+    /// # use alloc_collections::raw_vec::RawVec;
     /// struct MyVec<T> {
     ///     buf: RawVec<T>,
     ///     len: usize,
@@ -295,7 +298,7 @@ impl<T, A: Alloc> RawVec<T, A> {
     ///         // double would have aborted or panicked if the len exceeded
     ///         // `isize::MAX` so this is safe to do unchecked now.
     ///         unsafe {
-    ///             ptr::write(self.buf.ptr().add(self.len), elem);
+    ///             ptr::write(self.buf.ptr().as_ptr().add(self.len), elem);
     ///         }
     ///         self.len += 1;
     ///     }

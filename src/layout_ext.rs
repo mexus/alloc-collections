@@ -15,6 +15,8 @@ impl fmt::Display for LayoutErrExt {
     }
 }
 
+impl std::error::Error for LayoutErrExt {}
+
 pub trait LayoutExt: Sized {
     fn array_ext<T>(n: usize) -> Result<Self, LayoutErrExt>;
     fn repeat_ext(&self, n: usize) -> Result<(Self, usize), LayoutErrExt>;

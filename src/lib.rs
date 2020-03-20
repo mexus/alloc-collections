@@ -1,12 +1,12 @@
 //! A crate with collections that do not rely on global allocator.
 
 pub mod alloc;
+pub mod boxes;
 pub mod indexmap;
 pub mod layout_ext;
 pub mod raw_vec;
 pub mod unique;
 pub mod vec;
-pub mod fixed_vec;
 
 pub use alloc::Alloc;
 pub use indexmap::IndexMap;
