@@ -1,6 +1,6 @@
 [package]
 name = "alloc-collections"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["mexus <gilaldpellaeon@gmail.com>"]
 edition = "2018"
 description = "Collections with custom allocator support"
@@ -10,3 +10,8 @@ license = "MIT/Apache-2.0"
 
 [dependencies]
 snafu = "0.6"
+
+[dev-dependencies]
+quickcheck = "0.9.2"
+quickcheck_macros = "0.9.1"
+rand = "0.7.3"

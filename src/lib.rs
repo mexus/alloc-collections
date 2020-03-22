@@ -2,6 +2,7 @@
 
 pub mod alloc;
 pub mod boxes;
+pub mod deque;
 pub mod indexmap;
 pub mod layout_ext;
 pub mod raw_vec;

@@ -639,7 +639,8 @@ pub unsafe trait Alloc {
         Self: Sized,
     {
         let layout = Layout::array_ext::<T>(n).context(DeallocError)?;
-        Ok(self.dealloc(ptr.cast(), layout))
+        self.dealloc(ptr.cast(), layout);
+        Ok(())
     }
 }
 
