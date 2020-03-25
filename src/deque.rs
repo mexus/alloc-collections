@@ -10,6 +10,17 @@ use core::{fmt, ptr, slice};
 pub mod iter;
 
 /// Double-ended queue.
+///
+/// # Using in shared memory regions.
+///
+/// This queue aims to provide the following guarantee:
+///
+/// If a process that pushing data to the queue crashes in the middle of the action,
+/// e.g. before the data is fully written, the internal counters are increased in such an order,
+/// so reading partially-initialized data by other processes becomes impossible.
+///
+/// This behaviour is achieved by using volatile writes, so it won't safe you if you don't provide
+/// some kind of a memory barrier (by using mutex, for example).
 pub struct VecDeque<T, A: Alloc = Global> {
     buf: RawVec<T, A>,
 
@@ -191,11 +202,21 @@ impl<T, A: Alloc> VecDeque<T, A> {
     /// Tries to push an item to the end (back) of the queue.
     pub fn push_back(&mut self, item: T) -> Result<(), raw_vec::Error> {
         self.grow_if_necessary(1)?;
+
         let old_length = self.length;
-        self.length = old_length
+        let new_length = old_length
             .checked_add(1)
             .ok_or(raw_vec::Error::CapacityOverflow)?;
-        unsafe { self.nth_unchecked_mut(old_length).write(item) };
+
+        unsafe {
+            self.buf
+                .as_ptr()
+                .add((self.head + old_length) % self.buf.capacity())
+                .write_volatile(item)
+        };
+
+        // Update length only after we've finished writing data.
+        unsafe { (&mut self.length as *mut usize).write_volatile(new_length) };
         Ok(())
     }
 
@@ -203,16 +224,24 @@ impl<T, A: Alloc> VecDeque<T, A> {
     pub fn push_front(&mut self, item: T) -> Result<(), raw_vec::Error> {
         self.grow_if_necessary(1)?;
         let old_length = self.length;
-        self.length = old_length
+        let old_head = self.head;
+
+        let new_length = old_length
             .checked_add(1)
             .ok_or(raw_vec::Error::CapacityOverflow)?;
-        debug_assert_ne!(self.buf.capacity(), 0);
-        if self.head == 0 {
-            self.head = self.buf.capacity() - 1;
-        } else {
-            self.head -= 1;
-        }
-        unsafe { self.buf.as_ptr().add(self.head).write(item) };
+
+        let new_head = old_head
+            .checked_sub(1)
+            .unwrap_or_else(|| self.buf.capacity() - 1);
+
+        // Update head before we start writing data.
+        unsafe { (&mut self.head as *mut usize).write_volatile(new_head) };
+
+        // Now, write data.
+        unsafe { self.buf.as_ptr().add(new_head).write_volatile(item) };
+
+        // Update length only after we've updated head.
+        unsafe { (&mut self.length as *mut usize).write_volatile(new_length) };
         Ok(())
     }
 
@@ -575,7 +604,7 @@ mod test {
 
     #[test]
     fn check_len() {
-        let mut q = VecDeque::with_capacity(8).unwrap();
+        let mut q = VecDeque::<usize>::with_capacity(8).unwrap();
         assert!(q.is_empty());
         assert_eq!(q.len(), 0);
 
