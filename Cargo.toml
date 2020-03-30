@@ -1,6 +1,6 @@
 [package]
 name = "alloc-collections"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["mexus <gilaldpellaeon@gmail.com>"]
 edition = "2018"
 description = "Collections with custom allocator support"

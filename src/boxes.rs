@@ -5,7 +5,7 @@ use crate::{
     Vec,
 };
 use core::{
-    mem::{size_of, ManuallyDrop},
+    mem::{size_of, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{self, copy_nonoverlapping, NonNull},
     slice,
@@ -138,6 +138,14 @@ impl<T, A: Alloc> BoxedSlice<T, A> {
     }
 }
 
+impl<T, A: Alloc> BoxedSlice<MaybeUninit<T>, A> {
+    /// See `MaybeUninit::assume_init`.
+    pub unsafe fn assume_init(self) -> BoxedSlice<T, A> {
+        let (ptr, count, allocator) = self.into_raw_parts();
+        BoxedSlice::from_raw_parts(ptr.cast(), count, allocator)
+    }
+}
+
 impl<T, A: Alloc> Deref for BoxedSlice<T, A> {
     type Target = [T];
 
@@ -262,6 +270,14 @@ impl<T, A: Alloc> CustomBox<T, A> {
             ptr,
             allocator: ManuallyDrop::new(allocator),
         }
+    }
+}
+
+impl<T, A: Alloc> CustomBox<MaybeUninit<T>, A> {
+    /// See `MaybeUninit::assume_init`.
+    pub unsafe fn assume_init(self) -> CustomBox<T, A> {
+        let (ptr, allocator) = self.into_raw_parts();
+        CustomBox::from_raw_parts(ptr.cast(), allocator)
     }
 }
 
