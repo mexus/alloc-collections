@@ -203,6 +203,11 @@ impl<T> CustomBox<T> {
     pub fn new(item: T) -> Result<Self, AllocErr> {
         Self::new_in(item, <_>::default())
     }
+
+    /// See `MaybeUninit::uninit`.
+    pub fn new_uninit() -> Result<CustomBox<MaybeUninit<T>>, AllocErr> {
+        Self::new_uninit_in(<_>::default())
+    }
 }
 
 impl<T, A: Alloc> CustomBox<T, A> {
@@ -216,6 +221,19 @@ impl<T, A: Alloc> CustomBox<T, A> {
         unsafe { heap_ptr.as_ptr().write(item) }
         Ok(CustomBox {
             ptr: heap_ptr,
+            allocator: ManuallyDrop::new(allocator),
+        })
+    }
+
+    /// See `MaybeUninit::uninit`.
+    pub fn new_uninit_in(mut allocator: A) -> Result<CustomBox<MaybeUninit<T>, A>, AllocErr> {
+        let heap_ptr = if size_of::<T>() == 0 {
+            NonNull::<T>::dangling().cast()
+        } else {
+            allocator.alloc_one::<T>()?
+        };
+        Ok(CustomBox {
+            ptr: heap_ptr.cast(),
             allocator: ManuallyDrop::new(allocator),
         })
     }
