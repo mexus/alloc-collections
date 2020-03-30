@@ -61,7 +61,7 @@ use core::fmt;
 use core::hash::{self, Hash};
 use core::iter::{FromIterator, FusedIterator};
 use core::marker::PhantomData;
-use core::mem::{self, align_of, ManuallyDrop};
+use core::mem::{self, ManuallyDrop};
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ops::{self, Index, IndexMut, RangeBounds};
 use core::ptr::{self, NonNull};
@@ -69,10 +69,10 @@ use core::slice::{self, SliceIndex};
 
 use crate::{
     alloc::{Alloc, Global},
-    boxes::CustomBox,
+    boxes::BoxedSlice,
     raw_vec::{self, RawVec},
 };
-use core::{alloc::Layout, convert::TryFrom};
+use core::convert::TryFrom;
 
 #[macro_use]
 mod macros;
@@ -374,7 +374,7 @@ impl<T, A: Alloc> Vec<T, A> {
         })
     }
 
-    /// Converts the vector into `CustomBox<[T]>`.
+    /// Converts the vector into `BoxedSlice<T>`.
     ///
     /// Note that this will drop any excess capacity.
     ///
@@ -400,29 +400,19 @@ impl<T, A: Alloc> Vec<T, A> {
     /// let slice = vec.try_into_boxed_slice().unwrap();
     /// assert_eq!(slice.into_vec().capacity(), 3);
     /// ```
-    pub fn try_into_boxed_slice(mut self) -> Result<CustomBox<[T], A>, raw_vec::Error> {
+    pub fn try_into_boxed_slice(mut self) -> Result<BoxedSlice<T, A>, raw_vec::Error> {
         self.shrink_to_fit()?;
         let mut vector = ManuallyDrop::new(self);
         let allocator = unsafe { vector.buf.take_allocator_out() };
-
-        let layout = unsafe {
-            Layout::from_size_align_unchecked(vector.buf.allocated_size(), align_of::<T>())
-        };
-
-        let boxed =
-            unsafe { CustomBox::from_raw_parts(vector.buf.ptr().cast(), layout, allocator) };
-        Ok(boxed)
+        BoxedSlice::new_in(&vector[..], allocator)
+            .map_err(|source| raw_vec::Error::Allocation { source })
     }
 
     /// Converts an owned box slice into a vector.
-    pub fn from_boxed_slice(slice: CustomBox<[T], A>) -> Self {
-        let (ptr, layout, allocator) = slice.into_raw_parts();
-        let length = layout.size() / core::mem::size_of::<T>();
-        let raw = unsafe { RawVec::from_raw_parts_in(ptr.as_ptr().cast::<T>(), length, allocator) };
-        Vec {
-            buf: raw,
-            len: length,
-        }
+    pub fn from_boxed_slice(slice: BoxedSlice<T, A>) -> Self {
+        let (ptr, len, allocator) = slice.into_raw_parts();
+        let buf = unsafe { RawVec::from_raw_parts_in(ptr.as_ptr(), len, allocator) };
+        Vec { buf, len }
     }
 
     /// Creates a `Vec<T>` directly from the raw components of another vector.
@@ -2171,7 +2161,7 @@ impl<T, A: Alloc> Drain<'_, T, A> {
     }
 }
 
-impl<T, A: Alloc> TryFrom<Vec<T, A>> for CustomBox<[T], A> {
+impl<T, A: Alloc> TryFrom<Vec<T, A>> for BoxedSlice<T, A> {
     type Error = raw_vec::Error;
     fn try_from(vec: Vec<T, A>) -> Result<Self, Self::Error> {
         vec.try_into_boxed_slice()

@@ -1,7 +1,7 @@
 //! `IndexMap` is a hash table where the iteration order of the key-value
 //! pairs is independent of the hash values of the keys.
 
-use crate::{boxes::CustomBox, vec::Vec};
+use crate::{boxes::BoxedSlice, vec::Vec};
 
 pub use super::mutable_keys::MutableKeys;
 
@@ -328,7 +328,7 @@ where
 struct OrderMapCore<K, V, A: Alloc> {
     pub(crate) mask: usize,
     /// indices are the buckets. indices.len() == raw capacity
-    pub(crate) indices: CustomBox<[Pos], A>,
+    pub(crate) indices: BoxedSlice<Pos, A>,
     /// entries is a dense vec of entries in their order. entries.len() == len
     pub(crate) entries: Vec<Bucket<K, V>, A>,
 }
@@ -342,7 +342,7 @@ where
     fn try_clone(&self) -> Result<Self, Error> {
         let indices = self
             .indices
-            .try_clone_slice()
+            .try_clone()
             .map_err(|source| Error::Allocation { source })?;
         let entries = self.entries.try_clone()?;
         Ok(OrderMapCore {
@@ -410,7 +410,7 @@ where
             return Ok(());
         }
         writeln!(f)?;
-        for (i, index) in enumerate(self.core.indices.as_slice()) {
+        for (i, index) in enumerate(self.core.indices.iter()) {
             write!(f, "{}: {:?}", i, index)?;
             if let Some(pos) = index.pos() {
                 let hash = self.core.entries[pos].hash;
@@ -526,7 +526,7 @@ impl<K, V, S, A: Alloc> IndexMap<K, V, S, A> {
             Ok(IndexMap {
                 core: OrderMapCore {
                     mask: 0,
-                    indices: CustomBox::<[_], _>::new_unsized_in(&[], alloc.clone())
+                    indices: BoxedSlice::<_, _>::new_in([], alloc.clone())
                         .expect("Empty array, won't panic"),
                     entries: Vec::new_in(alloc),
                 },
@@ -613,7 +613,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
     #[inline(always)]
     fn raw_capacity(&self) -> usize {
-        self.indices.as_slice().len()
+        self.indices.len()
     }
 }
 
@@ -1444,7 +1444,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
     // clear self.indices to the same state as "no elements"
     fn clear_indices(&mut self) {
-        for pos in self.indices.as_slice_mut() {
+        for pos in self.indices.iter_mut() {
             *pos = Pos::none();
         }
     }
@@ -1479,7 +1479,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
         // find first ideally placed element -- start of cluster
         let mut first_ideal = 0;
-        for (i, index) in enumerate(self.indices.as_slice()) {
+        for (i, index) in enumerate(self.indices.iter()) {
             if let Some(pos) = index.pos() {
                 if 0 == probe_distance(self.mask, self.entries[pos].hash, i) {
                     first_ideal = i;
@@ -1490,7 +1490,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
 
         // visit the entries in an order where we can simply reinsert them
         // into self.indices without any bucket stealing.
-        let new_raw_cap = self.indices.as_slice().len() * 2;
+        let new_raw_cap = self.indices.len() * 2;
         let old_indices = replace(
             &mut self.indices,
             Vec::repeat_in(Pos::none(), new_raw_cap, self.entries.allocator().clone())?
@@ -1498,7 +1498,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         );
         self.mask = new_raw_cap.wrapping_sub(1);
 
-        let old_indices = old_indices.as_slice();
+        let old_indices = &old_indices[..];
 
         // `Sz` is the old size class, and either u32 or u64 is the new
         for &pos in &old_indices[first_ideal..] {
@@ -1533,7 +1533,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
             // find first empty bucket and insert there
             let mut probe = desired_pos(self.mask, entry_hash);
 
-            let indices = self.indices.as_slice_mut();
+            let indices = &mut self.indices[..];
             probe_loop!(probe < indices.len(), {
                 if indices[probe].is_none() {
                     // empty bucket, insert here
@@ -1562,8 +1562,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let mut probe = desired_pos(self.mask, hash);
         let mut dist = 0;
         debug_assert!(self.len() < self.raw_capacity());
-        probe_loop!(probe < self.indices.as_slice().len(), {
-            if let Some((i, hash_proxy)) = self.indices.as_slice()[probe].resolve::<Sz>() {
+        probe_loop!(probe < self.indices.len(), {
+            if let Some((i, hash_proxy)) = self.indices[probe].resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 // if existing element probed less than us, swap
                 let their_dist = probe_distance(self.mask, entry_hash.into_hash(), probe);
@@ -1615,8 +1615,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let mut dist = 0;
         let insert_kind;
         debug_assert!(self.len() < self.raw_capacity());
-        probe_loop!(probe < self.indices.as_slice().len(), {
-            let pos = &mut self.indices.as_slice_mut()[probe];
+        probe_loop!(probe < self.indices.len(), {
+            let pos = &mut self.indices[probe];
             if let Some((i, hash_proxy)) = pos.resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 // if existing element probed less than us, swap
@@ -1652,8 +1652,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
     where
         Sz: Size,
     {
-        probe_loop!(probe < self.indices.as_slice().len(), {
-            let pos = &mut self.indices.as_slice_mut()[probe];
+        probe_loop!(probe < self.indices.len(), {
+            let pos = &mut self.indices[probe];
             if pos.is_none() {
                 *pos = old_pos;
                 break;
@@ -1679,8 +1679,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         debug_assert!(self.len() > 0);
         let mut probe = desired_pos(self.mask, hash);
         let mut dist = 0;
-        probe_loop!(probe < self.indices.as_slice().len(), {
-            if let Some((i, hash_proxy)) = self.indices.as_slice()[probe].resolve::<Sz>() {
+        probe_loop!(probe < self.indices.len(), {
+            if let Some((i, hash_proxy)) = self.indices[probe].resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
                 if dist > probe_distance(self.mask, entry_hash.into_hash(), probe) {
                     // give up when probe distance is too long
@@ -1703,7 +1703,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         let hash = entry.hash;
         let actual_pos = ptrdistance(&self.entries[0], entry);
         let probe = dispatch_32_vs_64!(self =>
-            find_existing_entry_at(self.indices.as_slice(), hash, self.mask, actual_pos));
+            find_existing_entry_at(&self.indices, hash, self.mask, actual_pos));
         (probe, actual_pos)
     }
 
@@ -1719,14 +1719,14 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         // index `probe` and entry `found` is to be removed
         // use Vec::remove, but then we need to update the indices that point
         // to all of the other entries that have to move
-        self.indices.as_slice_mut()[probe] = Pos::none();
+        self.indices[probe] = Pos::none();
         let entry = self.entries.remove(found);
 
         // correct indices that point to the entries that followed the removed entry.
         // use a heuristic between a full sweep vs. a `probe_loop!` for every shifted item.
-        if self.indices.as_slice().len() < (self.entries.len() - found) * 2 {
+        if self.indices.len() < (self.entries.len() - found) * 2 {
             // shift all indices greater than `found`
-            for pos in self.indices.as_slice_mut() {
+            for pos in self.indices.iter_mut() {
                 if let Some((i, _)) = pos.resolve::<Sz>() {
                     if i > found {
                         // shift the index
@@ -1739,8 +1739,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
             for (offset, entry) in enumerate(&self.entries[found..]) {
                 let index = found + offset;
                 let mut probe = desired_pos(self.mask, entry.hash);
-                probe_loop!(probe < self.indices.as_slice().len(), {
-                    let pos = &mut self.indices.as_slice_mut()[probe];
+                probe_loop!(probe < self.indices.len(), {
+                    let pos = &mut self.indices[probe];
                     if let Some((i, _)) = pos.resolve::<Sz>() {
                         if i == index + 1 {
                             // found it, shift it
@@ -1769,7 +1769,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         // index `probe` and entry `found` is to be removed
         // use swap_remove, but then we need to update the index that points
         // to the other entry that has to move
-        self.indices.as_slice_mut()[probe] = Pos::none();
+        self.indices[probe] = Pos::none();
         let entry = self.entries.swap_remove(found);
 
         // correct index that points to the entry that had to swap places
@@ -1777,8 +1777,8 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
             // was not last element
             // examine new element in `found` and find it in indices
             let mut probe = desired_pos(self.mask, entry.hash);
-            probe_loop!(probe < self.indices.as_slice().len(), {
-                let pos = &mut self.indices.as_slice_mut()[probe];
+            probe_loop!(probe < self.indices.len(), {
+                let pos = &mut self.indices[probe];
                 if let Some((i, _)) = pos.resolve::<Sz>() {
                     if i >= self.entries.len() {
                         // found it
@@ -1802,7 +1802,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         // after probe, shift all non-ideally placed indices backward
         let mut last_probe = probe_at_remove;
         let mut probe = probe_at_remove + 1;
-        let indices = self.indices.as_slice_mut();
+        let indices = &mut self.indices;
         probe_loop!(probe < indices.len(), {
             if let Some((i, hash_proxy)) = indices[probe].resolve::<Sz>() {
                 let entry_hash = hash_proxy.get_short_hash(&self.entries, i);
@@ -1837,7 +1837,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
                 hash = ent.hash;
                 will_keep = keep(&mut ent.key, &mut ent.value);
             };
-            let indices = self.indices.as_slice_mut();
+            let indices = &mut self.indices;
             let probe = find_existing_entry_at::<Sz>(&indices, hash, self.mask, i);
             if !will_keep {
                 n_deleted += 1;
@@ -1879,7 +1879,7 @@ impl<K, V, A: Alloc> OrderMapCore<K, V, A> {
         }
 
         // Apply new index to self.indices
-        dispatch_32_vs_64!(self => apply_new_index(self.indices.as_slice_mut(), &side_index));
+        dispatch_32_vs_64!(self => apply_new_index(&mut self.indices, &side_index));
 
         fn apply_new_index<Sz>(indices: &mut [Pos], new_index: &[usize])
         where
