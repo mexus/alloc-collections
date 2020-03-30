@@ -248,6 +248,21 @@ impl<T, A: Alloc> CustomBox<T, A> {
             allocator: ManuallyDrop::new(new_allocator),
         })
     }
+
+    /// Breaks box into raw parts.
+    pub fn into_raw_parts(self) -> (NonNull<T>, A) {
+        let mut this = ManuallyDrop::new(self);
+        let allocator = unsafe { ManuallyDrop::take(&mut this.allocator) };
+        (this.ptr, allocator)
+    }
+
+    /// Reconstructs CustomBox from its raw parts.
+    pub unsafe fn from_raw_parts(ptr: NonNull<T>, allocator: A) -> Self {
+        CustomBox {
+            ptr,
+            allocator: ManuallyDrop::new(allocator),
+        }
+    }
 }
 
 impl<T, A: Alloc> Drop for CustomBox<T, A> {
